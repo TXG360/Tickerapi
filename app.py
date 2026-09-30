@@ -8,6 +8,7 @@ import csv
 import os
 import logging
 import time
+import requests
 
 app = Flask(__name__)
 
@@ -68,7 +69,15 @@ def get_val(df, row_name, col_index, default=0):
 def run_quant_math(ticker_symbol):
     def fetch():
         logger.info(f"Crunching financials for {ticker_symbol}...")
-        ticker = yf.Ticker(ticker_symbol)
+        
+        # --- THE BYPASS: Disguise the bot as a standard Chrome browser ---
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+        
+        ticker = yf.Ticker(ticker_symbol, session=session)
+        # -----------------------------------------------------------------
         
         try:
             bs = ticker.balance_sheet
@@ -251,7 +260,7 @@ def index():
                 <div class="sc"><span class="sl">Z-SCORE</span><span class="sv">{d.get('Z-Score', 'N/A')}</span></div>
                 <div class="sc"><span class="sl">ROIC</span><span class="sv">{d.get('ROIC', 'N/A')}{'%' if d.get('ROIC') != 'N/A' else ''}</span></div>
                 <div class="sc"><span class="sl">INTRINSIC VAL</span><span class="sv">${d.get('Intrinsic Value', 'N/A')}</span></div>
-                <div class="sc"><span class="sl">MARGIN OF SFTY</span><span class="sv" style="color:{'#00ff88' if isinstance(d.get('Margin of Safety'), (int, float)) and d.get('Margin of Safety') > 30 else '#888'}">{d.get('Margin of Safety', 'N/A')}%</span></div>
+                <div class="sc"><span class="sl">MARGIN OF SFTY</span><span class="sv" style="color:{'#00ff88' if isinstance(d.get('Margin of Safety'), (int, float)) and d.get('Margin of Safety') > 30 else '#ff6b6b' if isinstance(d.get('Margin of Safety'), (int, float)) else '#888'}">{d.get('Margin of Safety', 'N/A')}{'%' if d.get('Margin of Safety') != 'N/A' else ''}</span></div>
             </div>
             <div class="ai-banner">🧠 AI Qualitative Check: <b>{d.get('AI_Signal', 'N/A')}</b></div>
         </div>
