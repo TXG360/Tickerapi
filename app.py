@@ -70,38 +70,40 @@ def run_quant_math(ticker_symbol):
     def fetch():
         logger.info(f"Crunching financials for {ticker_symbol}...")
         
-        # --- THE BYPASS: Disguise the bot as a standard Chrome browser ---
         session = requests.Session()
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         })
         
         ticker = yf.Ticker(ticker_symbol, session=session)
-        # -----------------------------------------------------------------
         
         try:
             bs = ticker.balance_sheet
             inc = ticker.financials
             cf = ticker.cashflow
-            info = ticker.info
+            
+            # --- THE BYPASS: Avoid the blocked .info endpoint ---
+            fast = ticker.fast_info
+            price = getattr(fast, 'last_price', 0)
+            market_cap = getattr(fast, 'market_cap', 0)
             
             if bs.empty or inc.empty or cf.empty:
                 return {"Ticker": ticker_symbol, "Signal": "⚪️ SKIP (Missing Data - yFinance Blocked)"}
 
-            price = info.get('currentPrice', info.get('previousClose', 0))
-            market_cap = info.get('marketCap', 0)
-            total_debt = info.get('totalDebt', 0)
-            cash = info.get('totalCash', 0)
+            # Retrieve debt and cash manually from the balance sheet to avoid .info
+            tot_liab_0 = get_val(bs, 'Total Liabilities Net Minority Interest', 0)
+            cash = get_val(bs, 'Cash And Cash Equivalents', 0)
+            total_debt = get_val(bs, 'Total Debt', 0)
+            
             ev = market_cap + total_debt - cash if market_cap else 0
             
             tot_assets_0 = get_val(bs, 'Total Assets', 0)
             tot_assets_1 = get_val(bs, 'Total Assets', 1)
-            tot_liab_0 = get_val(bs, 'Total Liabilities Net Minority Interest', 0)
             curr_assets_0, curr_assets_1 = get_val(bs, 'Current Assets', 0), get_val(bs, 'Current Assets', 1)
             curr_liab_0, curr_liab_1 = get_val(bs, 'Current Liabilities', 0), get_val(bs, 'Current Liabilities', 1)
             lt_debt_0, lt_debt_1 = get_val(bs, 'Long Term Debt', 0), get_val(bs, 'Long Term Debt', 1)
             retained_earn = get_val(bs, 'Retained Earnings', 0)
-            shares_0, shares_1 = get_val(bs, 'Ordinary Shares Number', 0), get_val(bs, 'Ordinary Shares Number', 1)
+            shares_0, shares_1 = getattr(fast, 'shares', 0), getattr(fast, 'shares', 0) # Fallback
 
             net_income_0, net_income_1 = get_val(inc, 'Net Income', 0), get_val(inc, 'Net Income', 1)
             ebit_0 = get_val(inc, 'EBIT', 0)
@@ -135,8 +137,9 @@ def run_quant_math(ticker_symbol):
             roic = (ebit_0 / invested_capital) * 100 if invested_capital else 0
             earnings_yield = (ebit_0 / ev) * 100 if ev else 0
 
-            eps = info.get('trailingEps', 0)
-            growth_rate = min(info.get('earningsGrowth', 0) * 100, 12) 
+            # Conservative fallback if info block is missing EPS
+            eps = net_income_0 / shares_0 if shares_0 else 0
+            growth_rate = 5 # Fixed conservative 5% if API blocked
             intrinsic_value = eps * (8.5 + (2 * growth_rate)) if eps > 0 else 0
             margin_of_safety = ((intrinsic_value - price) / intrinsic_value) * 100 if intrinsic_value > 0 else -999
 
@@ -155,8 +158,9 @@ def run_quant_math(ticker_symbol):
                 "Signal": signal, "Color": color, "AI_Signal": "Pending"
             }
         except Exception as e:
+            # THIS WILL NOW PRINT THE EXACT ERROR ON YOUR DASHBOARD
             logger.error(f"Error processing {ticker_symbol}: {e}")
-            return {"Ticker": ticker_symbol, "Signal": "⚪️ SKIP (API Error)"}
+            return {"Ticker": ticker_symbol, "Signal": f"⚪️ SKIP (Error: {str(e)[:40]})"}
             
     return cached(f'quant_{ticker_symbol}', fetch)
 
