@@ -9,6 +9,7 @@ import os
 import logging
 import time
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
 
@@ -18,19 +19,13 @@ logger = logging.getLogger(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
 genai.configure(api_key=GEMINI_API_KEY)
 
-# ─── MASTER TICKER LIST (100+ High-Volume Stocks) ────────────────────────────
+# ─── 50 HIGH-QUALITY TARGETS (Optimized for Render Timeouts) ──────────────
 TARGET_TICKERS = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "NVDA", "BRK-B", "JNJ", "V",
-    "PG", "UNH", "HD", "MA", "DIS", "PYPL", "VZ", "ADBE", "NFLX", "INTC",
-    "CMCSA", "KO", "PFE", "PEP", "T", "WMT", "CRM", "ABT", "CVX", "MRK",
-    "NKE", "MCD", "TXN", "MDT", "COST", "HON", "AMGN", "SBUX", "BA", "IBM",
-    "QCOM", "C", "GE", "AMD", "NOW", "INTU", "MMM", "CAT", "SPGI", "GS",
-    "LOW", "TGT", "DE", "LMT", "BKNG", "PLD", "SYK", "CB", "GILD", "TMO",
-    "ISRG", "MDLZ", "CVS", "ZTS", "BDX", "TJX", "DUK", "SO", "CME", "CL",
-    "VRTX", "CSX", "EW", "REGN", "MU", "ATVI", "PGR", "ITW", "NOC", "WM",
-    "APD", "ECL", "BSX", "ICE", "FCX", "DG", "KLAC", "AON", "EMR", "MAR",
-    "MCO", "SNPS", "CTSH", "CDNS", "MCK", "ORLY", "PH", "APH", "MNST", "KHC",
-    "YUM", "KMB", "MSI", "AIG", "TEL", "IQV", "DLR", "PCAR", "TT", "A", "O"
+    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "BRK-B", "JNJ", "V", "PG",
+    "UNH", "HD", "MA", "DIS", "PYPL", "VZ", "ADBE", "NFLX", "INTC", "KO",
+    "PFE", "PEP", "T", "WMT", "CRM", "ABT", "CVX", "MRK", "NKE", "MCD",
+    "TXN", "MDT", "COST", "HON", "AMGN", "SBUX", "BA", "IBM", "QCOM", "C",
+    "GE", "AMD", "NOW", "INTU", "MMM", "CAT", "SPGI", "GS", "LOW", "TGT"
 ]
 
 LOG_FILE = "quant_value_ledger.csv"
@@ -74,91 +69,88 @@ def get_val(df, row_name, col_index, default=0):
     except: return default
 
 def run_quant_math(ticker_symbol):
-    def fetch():
-        logger.info(f"Crunching {ticker_symbol}...")
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        })
-        ticker = yf.Ticker(ticker_symbol, session=session)
+    logger.info(f"Crunching {ticker_symbol}...")
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
+    ticker = yf.Ticker(ticker_symbol, session=session)
+    
+    try:
+        bs = ticker.balance_sheet
+        inc = ticker.financials
+        cf = ticker.cashflow
+        fast = ticker.fast_info
         
-        try:
-            bs = ticker.balance_sheet
-            inc = ticker.financials
-            cf = ticker.cashflow
-            fast = ticker.fast_info
-            
-            price = getattr(fast, 'last_price', 0)
-            market_cap = getattr(fast, 'market_cap', 0)
-            
-            if bs.empty or inc.empty or cf.empty:
-                return {"Ticker": ticker_symbol, "Signal": "⚪️ SKIP (Missing Data)"}
+        price = getattr(fast, 'last_price', 0)
+        market_cap = getattr(fast, 'market_cap', 0)
+        
+        if bs.empty or inc.empty or cf.empty:
+            return {"Ticker": ticker_symbol, "Signal": "⚪️ SKIP (Missing Data)"}
 
-            tot_liab_0 = get_val(bs, 'Total Liabilities Net Minority Interest', 0)
-            cash = get_val(bs, 'Cash And Cash Equivalents', 0)
-            total_debt = get_val(bs, 'Total Debt', 0)
-            ev = market_cap + total_debt - cash if market_cap else 0
-            
-            tot_assets_0 = get_val(bs, 'Total Assets', 0)
-            tot_assets_1 = get_val(bs, 'Total Assets', 1)
-            curr_assets_0, curr_assets_1 = get_val(bs, 'Current Assets', 0), get_val(bs, 'Current Assets', 1)
-            curr_liab_0, curr_liab_1 = get_val(bs, 'Current Liabilities', 0), get_val(bs, 'Current Liabilities', 1)
-            lt_debt_0, lt_debt_1 = get_val(bs, 'Long Term Debt', 0), get_val(bs, 'Long Term Debt', 1)
-            retained_earn = get_val(bs, 'Retained Earnings', 0)
-            shares_0, shares_1 = getattr(fast, 'shares', 0), getattr(fast, 'shares', 0)
+        tot_liab_0 = get_val(bs, 'Total Liabilities Net Minority Interest', 0)
+        cash = get_val(bs, 'Cash And Cash Equivalents', 0)
+        total_debt = get_val(bs, 'Total Debt', 0)
+        ev = market_cap + total_debt - cash if market_cap else 0
+        
+        tot_assets_0 = get_val(bs, 'Total Assets', 0)
+        tot_assets_1 = get_val(bs, 'Total Assets', 1)
+        curr_assets_0, curr_assets_1 = get_val(bs, 'Current Assets', 0), get_val(bs, 'Current Assets', 1)
+        curr_liab_0, curr_liab_1 = get_val(bs, 'Current Liabilities', 0), get_val(bs, 'Current Liabilities', 1)
+        lt_debt_0, lt_debt_1 = get_val(bs, 'Long Term Debt', 0), get_val(bs, 'Long Term Debt', 1)
+        retained_earn = get_val(bs, 'Retained Earnings', 0)
+        shares_0, shares_1 = getattr(fast, 'shares', 0), getattr(fast, 'shares', 0)
 
-            net_income_0, net_income_1 = get_val(inc, 'Net Income', 0), get_val(inc, 'Net Income', 1)
-            ebit_0 = get_val(inc, 'EBIT', 0)
-            rev_0, rev_1 = get_val(inc, 'Total Revenue', 0), get_val(inc, 'Total Revenue', 1)
-            gp_0, gp_1 = get_val(inc, 'Gross Profit', 0), get_val(inc, 'Gross Profit', 1)
-            op_cf_0 = get_val(cf, 'Operating Cash Flow', 0)
+        net_income_0, net_income_1 = get_val(inc, 'Net Income', 0), get_val(inc, 'Net Income', 1)
+        ebit_0 = get_val(inc, 'EBIT', 0)
+        rev_0, rev_1 = get_val(inc, 'Total Revenue', 0), get_val(inc, 'Total Revenue', 1)
+        gp_0, gp_1 = get_val(inc, 'Gross Profit', 0), get_val(inc, 'Gross Profit', 1)
+        op_cf_0 = get_val(cf, 'Operating Cash Flow', 0)
 
-            f_score = 0
-            roa_0 = net_income_0 / tot_assets_0 if tot_assets_0 else 0
-            roa_1 = net_income_1 / tot_assets_1 if tot_assets_1 else 0
-            if roa_0 > 0: f_score += 1
-            if op_cf_0 > 0: f_score += 1
-            if roa_0 > roa_1: f_score += 1
-            if op_cf_0 > net_income_0: f_score += 1
-            if (lt_debt_0/tot_assets_0 if tot_assets_0 else 0) < (lt_debt_1/tot_assets_1 if tot_assets_1 else 0): f_score += 1
-            if (curr_assets_0/curr_liab_0 if curr_liab_0 else 0) > (curr_assets_1/curr_liab_1 if curr_liab_1 else 0): f_score += 1
-            if shares_0 <= shares_1: f_score += 1
-            if (gp_0/rev_0 if rev_0 else 0) > (gp_1/rev_1 if rev_1 else 0): f_score += 1
-            if (rev_0/tot_assets_0 if tot_assets_0 else 0) > (rev_1/tot_assets_1 if tot_assets_1 else 0): f_score += 1
+        f_score = 0
+        roa_0 = net_income_0 / tot_assets_0 if tot_assets_0 else 0
+        roa_1 = net_income_1 / tot_assets_1 if tot_assets_1 else 0
+        if roa_0 > 0: f_score += 1
+        if op_cf_0 > 0: f_score += 1
+        if roa_0 > roa_1: f_score += 1
+        if op_cf_0 > net_income_0: f_score += 1
+        if (lt_debt_0/tot_assets_0 if tot_assets_0 else 0) < (lt_debt_1/tot_assets_1 if tot_assets_1 else 0): f_score += 1
+        if (curr_assets_0/curr_liab_0 if curr_liab_0 else 0) > (curr_assets_1/curr_liab_1 if curr_liab_1 else 0): f_score += 1
+        if shares_0 <= shares_1: f_score += 1
+        if (gp_0/rev_0 if rev_0 else 0) > (gp_1/rev_1 if rev_1 else 0): f_score += 1
+        if (rev_0/tot_assets_0 if tot_assets_0 else 0) > (rev_1/tot_assets_1 if tot_assets_1 else 0): f_score += 1
 
-            working_cap = curr_assets_0 - curr_liab_0
-            A = working_cap / tot_assets_0 if tot_assets_0 else 0
-            B = retained_earn / tot_assets_0 if tot_assets_0 else 0
-            C = ebit_0 / tot_assets_0 if tot_assets_0 else 0
-            D = market_cap / tot_liab_0 if tot_liab_0 else 0
-            E = rev_0 / tot_assets_0 if tot_assets_0 else 0
-            z_score = (1.2 * A) + (1.4 * B) + (3.3 * C) + (0.6 * D) + (1.0 * E)
+        working_cap = curr_assets_0 - curr_liab_0
+        A = working_cap / tot_assets_0 if tot_assets_0 else 0
+        B = retained_earn / tot_assets_0 if tot_assets_0 else 0
+        C = ebit_0 / tot_assets_0 if tot_assets_0 else 0
+        D = market_cap / tot_liab_0 if tot_liab_0 else 0
+        E = rev_0 / tot_assets_0 if tot_assets_0 else 0
+        z_score = (1.2 * A) + (1.4 * B) + (3.3 * C) + (0.6 * D) + (1.0 * E)
 
-            invested_capital = tot_assets_0 - curr_liab_0
-            roic = (ebit_0 / invested_capital) * 100 if invested_capital else 0
-            earnings_yield = (ebit_0 / ev) * 100 if ev else 0
+        invested_capital = tot_assets_0 - curr_liab_0
+        roic = (ebit_0 / invested_capital) * 100 if invested_capital else 0
+        earnings_yield = (ebit_0 / ev) * 100 if ev else 0
 
-            eps = net_income_0 / shares_0 if shares_0 else 0
-            growth_rate = 5 
-            intrinsic_value = eps * (8.5 + (2 * growth_rate)) if eps > 0 else 0
-            margin_of_safety = ((intrinsic_value - price) / intrinsic_value) * 100 if intrinsic_value > 0 else -999
+        eps = net_income_0 / shares_0 if shares_0 else 0
+        growth_rate = 5 
+        intrinsic_value = eps * (8.5 + (2 * growth_rate)) if eps > 0 else 0
+        margin_of_safety = ((intrinsic_value - price) / intrinsic_value) * 100 if intrinsic_value > 0 else -999
 
-            signal = "🔴 MATH REJECTED"
-            color = "#ff6b6b"
-            if f_score >= 7 and z_score > 3.0 and roic > 15 and margin_of_safety >= 30:
-                signal = "🟡 MATH PASSED - AWAITING AI"
-                color = "#ffd700"
+        signal = "🔴 MATH REJECTED"
+        color = "#ff6b6b"
+        if f_score >= 7 and z_score > 3.0 and roic > 15 and margin_of_safety >= 30:
+            signal = "🟡 MATH PASSED - AWAITING AI"
+            color = "#ffd700"
 
-            return {
-                "Ticker": ticker_symbol, "Price": round(price, 2), "Intrinsic Value": round(intrinsic_value, 2), 
-                "Margin of Safety": round(margin_of_safety, 2), "F-Score": f_score, "Z-Score": round(z_score, 2), 
-                "ROIC": round(roic, 2), "Earnings Yield": round(earnings_yield, 2), "Signal": signal, 
-                "Color": color, "AI_Signal": "Pending"
-            }
-        except Exception as e:
-            return {"Ticker": ticker_symbol, "Signal": f"⚪️ SKIP (Error: {str(e)[:40]})"}
-            
-    return cached(f'quant_{ticker_symbol}', fetch)
+        return {
+            "Ticker": ticker_symbol, "Price": round(price, 2), "Intrinsic Value": round(intrinsic_value, 2), 
+            "Margin of Safety": round(margin_of_safety, 2), "F-Score": f_score, "Z-Score": round(z_score, 2), 
+            "ROIC": round(roic, 2), "Earnings Yield": round(earnings_yield, 2), "Signal": signal, 
+            "Color": color, "AI_Signal": "Pending"
+        }
+    except Exception as e:
+        return {"Ticker": ticker_symbol, "Signal": f"⚪️ SKIP (Error: {str(e)[:40]})"}
 
 def run_ai_qualitative_check(ticker, data_dict):
     if "MATH PASSED" not in data_dict['Signal']:
@@ -182,18 +174,29 @@ def run_ai_qualitative_check(ticker, data_dict):
 
 def process_all_tickers():
     results = []
-    for ticker in TARGET_TICKERS:
-        math_result = run_quant_math(ticker)
-        if "SKIP" in math_result['Signal']: 
-            for key in ['Price', 'Intrinsic Value', 'Margin of Safety']: math_result[key] = 0
-            for key in ['F-Score', 'Z-Score', 'ROIC', 'Earnings Yield']: math_result[key] = 'N/A'
-            math_result['Color'] = '#888888'
-            math_result['AI_Signal'] = 'Skipped'
-            results.append(math_result)
-            continue
-        final_result = run_ai_qualitative_check(ticker, math_result)
-        log_scanned_stock(final_result)
-        results.append(final_result)
+    
+    # --- MULTI-THREADING SPEED BOOST ---
+    # Runs 10 stocks simultaneously to beat the Render 60-second timeout
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_ticker = {executor.submit(run_quant_math, ticker): ticker for ticker in TARGET_TICKERS}
+        
+        for future in as_completed(future_to_ticker):
+            math_result = future.result()
+            
+            if "SKIP" in math_result['Signal']: 
+                for key in ['Price', 'Intrinsic Value', 'Margin of Safety']: math_result[key] = 0
+                for key in ['F-Score', 'Z-Score', 'ROIC', 'Earnings Yield']: math_result[key] = 'N/A'
+                math_result['Color'] = '#888888'
+                math_result['AI_Signal'] = 'Skipped'
+                results.append(math_result)
+                continue
+                
+            final_result = run_ai_qualitative_check(math_result['Ticker'], math_result)
+            log_scanned_stock(final_result)
+            results.append(final_result)
+            
+    # Alphabetize the final list
+    results.sort(key=lambda x: x['Ticker'])
     return results
 
 @app.route('/api/scan')
@@ -210,6 +213,8 @@ def api_ledger():
 def index():
     pacific = pytz.timezone('America/Los_Angeles')
     now_pt = datetime.now(pacific).strftime('%I:%M %p PT &middot; %b %d, %Y')
+    
+    # We call the main processing function which is now supercharged with threading
     data = cached('daily_scan', process_all_tickers, ttl=43200)
     
     buys = [d for d in data if "BUY" in d['Signal']]
