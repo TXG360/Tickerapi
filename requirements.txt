@@ -2,7 +2,7 @@ Flask==3.0.0
 requests==2.31.0
 numpy==1.26.4
 pandas==2.1.1
-yfinance==0.2.31
+yfinance
 pytz==2023.3
 google-generativeai==0.3.1
 gunicorn==21.2.0
