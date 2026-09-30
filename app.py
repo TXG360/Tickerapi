@@ -9,6 +9,7 @@ import os
 import logging
 import time
 import requests
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
@@ -19,7 +20,6 @@ logger = logging.getLogger(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
 genai.configure(api_key=GEMINI_API_KEY)
 
-# ─── 50 HIGH-QUALITY TARGETS (Optimized for Render Timeouts) ──────────────
 TARGET_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "BRK-B", "JNJ", "V", "PG",
     "UNH", "HD", "MA", "DIS", "PYPL", "VZ", "ADBE", "NFLX", "INTC", "KO",
@@ -31,6 +31,9 @@ TARGET_TICKERS = [
 LOG_FILE = "quant_value_ledger.csv"
 CACHE_TTL = 43200  
 _cache = {}
+
+# --- Global flag to prevent multiple background runs ---
+is_fetching = False
 
 def init_csv_logger():
     if not os.path.exists(LOG_FILE):
@@ -56,14 +59,6 @@ def log_scanned_stock(data):
     except Exception as e:
         logger.error(f"CSV Logging Error: {e}")
 
-def cached(key, fn, ttl=CACHE_TTL):
-    now = time.time()
-    if key in _cache and now - _cache[key]['ts'] < ttl:
-        return _cache[key]['data']
-    result = fn()
-    _cache[key] = {'data': result, 'ts': now}
-    return result
-
 def get_val(df, row_name, col_index, default=0):
     try: return df.loc[row_name].iloc[col_index]
     except: return default
@@ -72,7 +67,7 @@ def run_quant_math(ticker_symbol):
     logger.info(f"Crunching {ticker_symbol}...")
     session = requests.Session()
     session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     })
     ticker = yf.Ticker(ticker_symbol, session=session)
     
@@ -174,12 +169,8 @@ def run_ai_qualitative_check(ticker, data_dict):
 
 def process_all_tickers():
     results = []
-    
-    # --- MULTI-THREADING SPEED BOOST ---
-    # Runs 10 stocks simultaneously to beat the Render 60-second timeout
     with ThreadPoolExecutor(max_workers=10) as executor:
         future_to_ticker = {executor.submit(run_quant_math, ticker): ticker for ticker in TARGET_TICKERS}
-        
         for future in as_completed(future_to_ticker):
             math_result = future.result()
             
@@ -195,13 +186,24 @@ def process_all_tickers():
             log_scanned_stock(final_result)
             results.append(final_result)
             
-    # Alphabetize the final list
     results.sort(key=lambda x: x['Ticker'])
     return results
 
+def background_fetch_task():
+    global is_fetching
+    try:
+        data = process_all_tickers()
+        _cache['daily_scan'] = {'data': data, 'ts': time.time()}
+    except Exception as e:
+        logger.error(f"Background Fetch Failed: {e}")
+    finally:
+        is_fetching = False
+
 @app.route('/api/scan')
 def api_scan():
-    return jsonify(cached('daily_scan', process_all_tickers, ttl=43200))
+    if 'daily_scan' in _cache:
+        return jsonify(_cache['daily_scan']['data'])
+    return jsonify({"message": "Data currently generating in background. Try again in 60s."}), 202
 
 @app.route('/api/ledger')
 def api_ledger():
@@ -211,12 +213,44 @@ def api_ledger():
 
 @app.route('/')
 def index():
+    global is_fetching
     pacific = pytz.timezone('America/Los_Angeles')
     now_pt = datetime.now(pacific).strftime('%I:%M %p PT &middot; %b %d, %Y')
     
-    # We call the main processing function which is now supercharged with threading
-    data = cached('daily_scan', process_all_tickers, ttl=43200)
+    # 1. If we have fresh data in the cache, serve the dashboard normally.
+    if 'daily_scan' in _cache and (time.time() - _cache['daily_scan']['ts'] < CACHE_TTL):
+        data = _cache['daily_scan']['data']
+    else:
+        # 2. If no data, trigger the background thread and show the Loading Screen!
+        if not is_fetching:
+            is_fetching = True
+            thread = threading.Thread(target=background_fetch_task)
+            thread.daemon = True
+            thread.start()
+            
+        return """
+        <!DOCTYPE html><html>
+        <head>
+            <title>Crunching Data...</title>
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <meta http-equiv="refresh" content="10">
+            <style>
+                body { background: #1a1a2e; color: #7ec8e3; font-family: Arial, sans-serif; text-align: center; padding: 20% 20px; }
+                h1 { color: #ffd700; margin-bottom: 10px; }
+                .spinner { margin: 20px auto; width: 50px; height: 50px; border: 5px solid rgba(255,255,255,0.1); border-radius: 50%; border-top-color: #00ff88; animation: spin 1s ease-in-out infinite; }
+                @keyframes spin { to { transform: rotate(360deg); } }
+            </style>
+        </head>
+        <body>
+            <div class="spinner"></div>
+            <h1>⚙️ Quant Engine is crunching data...</h1>
+            <p>Scanning SEC filings and accounting data for 50 companies.</p>
+            <p style="color:#888; font-size:0.85em; margin-top:20px;">This page will automatically refresh every 10 seconds.</p>
+        </body>
+        </html>
+        """
     
+    # --- The Dashboard HTML (Only renders once data is ready) ---
     buys = [d for d in data if "BUY" in d['Signal']]
     rejects = [d for d in data if "REJECT" in d['Signal']]
     skips = [d for d in data if "SKIP" in d['Signal']]
