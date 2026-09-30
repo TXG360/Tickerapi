@@ -12,21 +12,31 @@ import requests
 
 app = Flask(__name__)
 
-# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
-# ─── CONFIG & API KEYS ────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
 genai.configure(api_key=GEMINI_API_KEY)
 
-TARGET_TICKERS = ["AAPL", "TGT", "F", "XOM", "MCD", "PFE", "CROX", "META"]
+# ─── MASTER TICKER LIST (100+ High-Volume Stocks) ────────────────────────────
+TARGET_TICKERS = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "NVDA", "BRK-B", "JNJ", "V",
+    "PG", "UNH", "HD", "MA", "DIS", "PYPL", "VZ", "ADBE", "NFLX", "INTC",
+    "CMCSA", "KO", "PFE", "PEP", "T", "WMT", "CRM", "ABT", "CVX", "MRK",
+    "NKE", "MCD", "TXN", "MDT", "COST", "HON", "AMGN", "SBUX", "BA", "IBM",
+    "QCOM", "C", "GE", "AMD", "NOW", "INTU", "MMM", "CAT", "SPGI", "GS",
+    "LOW", "TGT", "DE", "LMT", "BKNG", "PLD", "SYK", "CB", "GILD", "TMO",
+    "ISRG", "MDLZ", "CVS", "ZTS", "BDX", "TJX", "DUK", "SO", "CME", "CL",
+    "VRTX", "CSX", "EW", "REGN", "MU", "ATVI", "PGR", "ITW", "NOC", "WM",
+    "APD", "ECL", "BSX", "ICE", "FCX", "DG", "KLAC", "AON", "EMR", "MAR",
+    "MCO", "SNPS", "CTSH", "CDNS", "MCK", "ORLY", "PH", "APH", "MNST", "KHC",
+    "YUM", "KMB", "MSI", "AIG", "TEL", "IQV", "DLR", "PCAR", "TT", "A", "O"
+]
 
 LOG_FILE = "quant_value_ledger.csv"
-CACHE_TTL = 86400  
+CACHE_TTL = 43200  
 _cache = {}
 
-# ─── CSV Auto-Logger ──────────────────────────────────────────────────────────
 def init_csv_logger():
     if not os.path.exists(LOG_FILE):
         with open(LOG_FILE, mode='w', newline='', encoding='utf-8') as file:
@@ -40,7 +50,6 @@ def log_scanned_stock(data):
     init_csv_logger()
     pacific = pytz.timezone('America/Los_Angeles')
     today_str = datetime.now(pacific).strftime('%Y-%m-%d')
-    
     try:
         with open(LOG_FILE, mode='a', newline='', encoding='utf-8') as file:
             writer = csv.writer(file)
@@ -52,7 +61,6 @@ def log_scanned_stock(data):
     except Exception as e:
         logger.error(f"CSV Logging Error: {e}")
 
-# ─── DATA ENGINE & CACHING ────────────────────────────────────────────────────
 def cached(key, fn, ttl=CACHE_TTL):
     now = time.time()
     if key in _cache and now - _cache[key]['ts'] < ttl:
@@ -65,36 +73,30 @@ def get_val(df, row_name, col_index, default=0):
     try: return df.loc[row_name].iloc[col_index]
     except: return default
 
-# ─── THE MATH ENGINE (Phase 1 & 2) ────────────────────────────────────────────
 def run_quant_math(ticker_symbol):
     def fetch():
-        logger.info(f"Crunching financials for {ticker_symbol}...")
-        
+        logger.info(f"Crunching {ticker_symbol}...")
         session = requests.Session()
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         })
-        
         ticker = yf.Ticker(ticker_symbol, session=session)
         
         try:
             bs = ticker.balance_sheet
             inc = ticker.financials
             cf = ticker.cashflow
-            
-            # --- THE BYPASS: Avoid the blocked .info endpoint ---
             fast = ticker.fast_info
+            
             price = getattr(fast, 'last_price', 0)
             market_cap = getattr(fast, 'market_cap', 0)
             
             if bs.empty or inc.empty or cf.empty:
-                return {"Ticker": ticker_symbol, "Signal": "⚪️ SKIP (Missing Data - yFinance Blocked)"}
+                return {"Ticker": ticker_symbol, "Signal": "⚪️ SKIP (Missing Data)"}
 
-            # Retrieve debt and cash manually from the balance sheet to avoid .info
             tot_liab_0 = get_val(bs, 'Total Liabilities Net Minority Interest', 0)
             cash = get_val(bs, 'Cash And Cash Equivalents', 0)
             total_debt = get_val(bs, 'Total Debt', 0)
-            
             ev = market_cap + total_debt - cash if market_cap else 0
             
             tot_assets_0 = get_val(bs, 'Total Assets', 0)
@@ -103,7 +105,7 @@ def run_quant_math(ticker_symbol):
             curr_liab_0, curr_liab_1 = get_val(bs, 'Current Liabilities', 0), get_val(bs, 'Current Liabilities', 1)
             lt_debt_0, lt_debt_1 = get_val(bs, 'Long Term Debt', 0), get_val(bs, 'Long Term Debt', 1)
             retained_earn = get_val(bs, 'Retained Earnings', 0)
-            shares_0, shares_1 = getattr(fast, 'shares', 0), getattr(fast, 'shares', 0) # Fallback
+            shares_0, shares_1 = getattr(fast, 'shares', 0), getattr(fast, 'shares', 0)
 
             net_income_0, net_income_1 = get_val(inc, 'Net Income', 0), get_val(inc, 'Net Income', 1)
             ebit_0 = get_val(inc, 'EBIT', 0)
@@ -114,7 +116,6 @@ def run_quant_math(ticker_symbol):
             f_score = 0
             roa_0 = net_income_0 / tot_assets_0 if tot_assets_0 else 0
             roa_1 = net_income_1 / tot_assets_1 if tot_assets_1 else 0
-            
             if roa_0 > 0: f_score += 1
             if op_cf_0 > 0: f_score += 1
             if roa_0 > roa_1: f_score += 1
@@ -137,79 +138,59 @@ def run_quant_math(ticker_symbol):
             roic = (ebit_0 / invested_capital) * 100 if invested_capital else 0
             earnings_yield = (ebit_0 / ev) * 100 if ev else 0
 
-            # Conservative fallback if info block is missing EPS
             eps = net_income_0 / shares_0 if shares_0 else 0
-            growth_rate = 5 # Fixed conservative 5% if API blocked
+            growth_rate = 5 
             intrinsic_value = eps * (8.5 + (2 * growth_rate)) if eps > 0 else 0
             margin_of_safety = ((intrinsic_value - price) / intrinsic_value) * 100 if intrinsic_value > 0 else -999
 
             signal = "🔴 MATH REJECTED"
             color = "#ff6b6b"
-            
             if f_score >= 7 and z_score > 3.0 and roic > 15 and margin_of_safety >= 30:
                 signal = "🟡 MATH PASSED - AWAITING AI"
                 color = "#ffd700"
 
             return {
-                "Ticker": ticker_symbol, "Price": round(price, 2), 
-                "Intrinsic Value": round(intrinsic_value, 2), "Margin of Safety": round(margin_of_safety, 2),
-                "F-Score": f_score, "Z-Score": round(z_score, 2), 
-                "ROIC": round(roic, 2), "Earnings Yield": round(earnings_yield, 2),
-                "Signal": signal, "Color": color, "AI_Signal": "Pending"
+                "Ticker": ticker_symbol, "Price": round(price, 2), "Intrinsic Value": round(intrinsic_value, 2), 
+                "Margin of Safety": round(margin_of_safety, 2), "F-Score": f_score, "Z-Score": round(z_score, 2), 
+                "ROIC": round(roic, 2), "Earnings Yield": round(earnings_yield, 2), "Signal": signal, 
+                "Color": color, "AI_Signal": "Pending"
             }
         except Exception as e:
-            # THIS WILL NOW PRINT THE EXACT ERROR ON YOUR DASHBOARD
-            logger.error(f"Error processing {ticker_symbol}: {e}")
             return {"Ticker": ticker_symbol, "Signal": f"⚪️ SKIP (Error: {str(e)[:40]})"}
             
     return cached(f'quant_{ticker_symbol}', fetch)
 
-# ─── THE AI ENGINE (Phase 3) ──────────────────────────────────────────────────
 def run_ai_qualitative_check(ticker, data_dict):
     if "MATH PASSED" not in data_dict['Signal']:
         data_dict['AI_Signal'] = "Skipped (Failed Math)"
         return data_dict
-
     try:
         model = genai.GenerativeModel('gemini-1.5-flash')
-        prompt = f"""
-        You are a ruthless distressed-debt analyst. Scan the internet and SEC filings for {ticker}.
+        prompt = f"""You are a ruthless distressed-debt analyst. Scan the internet and SEC filings for {ticker}.
         Ignore boilerplate market risks. Identify ONLY asymmetric threats:
         1. Customer/Supplier Concentration
         2. Legal & Regulatory Guillotines
         3. Massive upcoming debt maturities
-        4. Accounting irregularities
-        
-        Respond ONLY with a JSON object: {{"threats_found": "description of threat or 'None'", "override_reject": true/false}}
-        """
+        Respond ONLY with a JSON object: {{"threats_found": "description or 'None'", "override_reject": true/false}}"""
         response = model.generate_content(prompt)
         data_dict['AI_Signal'] = "🟢 CLEAR (No Asymmetric Threats)"
         data_dict['Signal'] = "🟢 STRONG BUY"
         data_dict['Color'] = "#00ff88"
     except Exception as e:
-        logger.error(f"AI Check Failed for {ticker}: {e}")
         data_dict['AI_Signal'] = "⚠️ AI ERROR"
-        
     return data_dict
 
-# ─── ROUTES ───────────────────────────────────────────────────────────────────
 def process_all_tickers():
     results = []
     for ticker in TARGET_TICKERS:
         math_result = run_quant_math(ticker)
         if "SKIP" in math_result['Signal']: 
-            math_result['Price'] = 0
-            math_result['Intrinsic Value'] = 0
-            math_result['Margin of Safety'] = 0
-            math_result['F-Score'] = 'N/A'
-            math_result['Z-Score'] = 'N/A'
-            math_result['ROIC'] = 'N/A'
-            math_result['Earnings Yield'] = 'N/A'
+            for key in ['Price', 'Intrinsic Value', 'Margin of Safety']: math_result[key] = 0
+            for key in ['F-Score', 'Z-Score', 'ROIC', 'Earnings Yield']: math_result[key] = 'N/A'
             math_result['Color'] = '#888888'
             math_result['AI_Signal'] = 'Skipped'
             results.append(math_result)
             continue
-            
         final_result = run_ai_qualitative_check(ticker, math_result)
         log_scanned_stock(final_result)
         results.append(final_result)
@@ -217,8 +198,7 @@ def process_all_tickers():
 
 @app.route('/api/scan')
 def api_scan():
-    data = cached('daily_scan', process_all_tickers, ttl=43200) 
-    return jsonify(data)
+    return jsonify(cached('daily_scan', process_all_tickers, ttl=43200))
 
 @app.route('/api/ledger')
 def api_ledger():
@@ -230,7 +210,6 @@ def api_ledger():
 def index():
     pacific = pytz.timezone('America/Los_Angeles')
     now_pt = datetime.now(pacific).strftime('%I:%M %p PT &middot; %b %d, %Y')
-    
     data = cached('daily_scan', process_all_tickers, ttl=43200)
     
     buys = [d for d in data if "BUY" in d['Signal']]
@@ -241,8 +220,13 @@ def index():
     *{box-sizing:border-box;margin:0;padding:0}
     body{font-family:Arial,sans-serif;background:#1a1a2e;color:#eee;padding:16px;max-width:1100px;margin:auto}
     h1{color:#ffd700;font-size:1.5em;margin-bottom:4px}
-    h2{font-size:1.1em;margin:16px 0 8px}
     .sub{color:#888;font-size:0.82em;margin-bottom:16px}
+    details{background:#0f1929; border:1px solid #1a2540; border-radius:8px; margin-bottom:12px; padding:2px;}
+    summary{padding:14px; cursor:pointer; font-size:1.1em; font-weight:bold; outline:none;}
+    summary::-webkit-details-marker{display:none;}
+    .cat-title{display:flex; justify-content:space-between; align-items:center; width:100%;}
+    .badge{font-size:0.8em; padding:4px 8px; border-radius:12px; background:#1a2540; color:#aaa;}
+    .content{padding:0 10px 10px 10px;}
     .game{background:#16213e;border:1px solid #0f3460;padding:14px;margin:10px 0;border-radius:10px; border-left:4px solid;}
     .gh{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px; font-size:1.2em; font-weight:bold;}
     .sgrid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
@@ -255,10 +239,7 @@ def index():
     def render_card(d):
         return f"""
         <div class="game" style="border-left-color:{d.get('Color', '#888')}">
-            <div class="gh">
-                <span>{d['Ticker']} <span style="color:#88ff44; font-size:0.8em">${d.get('Price', 0)}</span></span>
-                <span style="color:{d.get('Color', '#888')}; font-size:0.8em">{d['Signal']}</span>
-            </div>
+            <div class="gh"><span>{d['Ticker']} <span style="color:#88ff44; font-size:0.8em">${d.get('Price', 0)}</span></span><span style="color:{d.get('Color', '#888')}; font-size:0.8em">{d['Signal']}</span></div>
             <div class="sgrid">
                 <div class="sc"><span class="sl">F-SCORE</span><span class="sv">{d.get('F-Score', 'N/A')}{'/9' if d.get('F-Score') != 'N/A' else ''}</span></div>
                 <div class="sc"><span class="sl">Z-SCORE</span><span class="sv">{d.get('Z-Score', 'N/A')}</span></div>
@@ -270,17 +251,24 @@ def index():
         </div>
         """
         
+    def section(title, color, items, is_open=False):
+        open_tag = "open" if is_open else ""
+        content = ''.join(render_card(d) for d in items) if items else '<p style="color:#888; padding:10px;">No stocks in this category today.</p>'
+        return f"""
+        <details {open_tag} style="border-left: 4px solid {color};">
+            <summary><div class="cat-title"><span style="color:{color}">{title}</span><span class="badge">{len(items)} Tickers</span></div></summary>
+            <div class="content">{content}</div>
+        </details>
+        """
+
     html = f"""<!DOCTYPE html><html>
-    <head><title>Quant Value Dashboard</title><style>{css}</style><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+    <head><title>Quant Value Engine</title><style>{css}</style><meta name="viewport" content="width=device-width,initial-scale=1"></head>
     <body>
-      <h1>📈 Autonomous Quant Value Engine</h1>
+      <h1>📈 Autonomous Quant Engine</h1>
       <p class="sub">Last scan: {now_pt}</p>
-      <h2 style="color:#00ff88">🟢 Cleared for Purchase</h2>
-      {''.join(render_card(d) for d in buys) if buys else '<p style="color:#888">No stocks passed the brutal filter today. Cash is king.</p>'}
-      <h2 style="color:#ff6b6b">🔴 Math Rejects</h2>
-      {''.join(render_card(d) for d in rejects) if rejects else '<p style="color:#888">No rejects logged.</p>'}
-      <h2 style="color:#888888">⚪️ Skipped / Data Errors</h2>
-      {''.join(render_card(d) for d in skips) if skips else ''}
+      {section('🟢 Cleared for Purchase', '#00ff88', buys, is_open=True)}
+      {section('🔴 Math Rejects', '#ff6b6b', rejects, is_open=False)}
+      {section('⚪️ Skipped / Data Errors', '#888888', skips, is_open=False)}
     </body></html>"""
     return html
 
